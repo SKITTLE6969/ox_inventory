@@ -1,5 +1,8 @@
 if not lib then return end
 
+local holdingProp = nil
+local givingItem = false
+
 require 'modules.bridge.client'
 require 'modules.interface.client'
 
@@ -117,6 +120,7 @@ local Inventory = require 'modules.inventory.client'
 ---@param data any?
 ---@return boolean?
 function client.openInventory(inv, data)
+	givingItem = false
 	if invOpen then
 		if not inv and currentInventory.type == 'newdrop' then
 			return client.closeInventory()
@@ -349,6 +353,10 @@ lib.callback.register('ox_inventory:usingItem', function(data)
 			item.anim = Animations.anim[item.anim]
 		end
 
+		if item.propTwo then
+			item.prop = { item.prop, item.propTwo }
+		end
+
 		if item.prop then
 			if item.prop[1] then
 				for i = 1, #item.prop do
@@ -501,7 +509,7 @@ local function useSlot(slot)
 
 				if weaponSlot == data.slot then return end
 			end
-
+			
             GiveWeaponToPed(playerPed, data.hash, 0, false, true)
             SetCurrentPedWeapon(playerPed, data.hash, false)
 
@@ -736,7 +744,7 @@ local function registerCommands()
 			if closest and closest.currentDistance < 1.2 and (not closest.instance or closest.instance == currentInstance) then
 				if closest.inv == 'crafting' then
 					return client.openInventory('crafting', { id = closest.id, index = closest.index })
-				elseif closest.inv ~= 'license' and closest.inv ~= 'policeevidence' then
+				elseif closest.invId and closest.inv ~= 'license' and closest.inv ~= 'policeevidence' then
 					return client.openInventory(closest.inv or 'drop', { id = closest.invId, type = closest.type })
 				end
 			end
@@ -977,29 +985,39 @@ RegisterNetEvent('ox_inventory:inventoryConfiscated', function(message)
 	updateInventory(items, 0)
 end)
 
-
----@param point CPoint
-local function nearbyDrop(point)
-	if not point.instance or point.instance == currentInstance then
-		---@diagnostic disable-next-line: param-type-mismatch
-		DrawMarker(2, point.coords.x, point.coords.y, point.coords.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.2, 0.15, 150, 30, 30, 222, false, false, 0, true, false, false, false)
-	end
-end
-
 ---@param point CPoint
 local function onEnterDrop(point)
 	if not point.instance or point.instance == currentInstance and not point.entity then
 		local model = point.model or client.dropmodel
-
 		lib.requestModel(model)
-
-		local entity = CreateObject(model, point.coords.x, point.coords.y, point.coords.z, false, true, true)
-
+		local entity = CreateObject(model, point.actualCoords.x, point.actualCoords.y, point.actualCoords.z, false, true, true)
 		SetModelAsNoLongerNeeded(model)
-		PlaceObjectOnGroundProperly(entity)
+		if not point.dontGround then PlaceObjectOnGroundProperly(entity) end
 		FreezeEntityPosition(entity, true)
 		SetEntityCollision(entity, false, true)
-
+		if point.actualCoords.w then SetEntityHeading(entity, point.actualCoords.w) end
+		exports.interact:AddLocalEntityInteraction({
+			entity = entity,
+			id = 'ox_invDrop'..point.dropId,
+			ignoreLos = true,
+			distance = 6.0,
+			interactDst = 1.5,
+			offset = vec3(0.0, 0.0, 0.3),
+			options = {
+				{
+					--label = 'Grab Item',
+					action = function(entity, coords, args)
+						if point.model then
+							local grabbedItems = lib.callback.await('ox_inventory:canPickUpDrop', false, point.dropId)
+							Utils.PlayAnim(0, 'pickup_object', 'putdown_low', 5.0, 1.5, 1000, 48, 0.0, 0, 0, 0)
+							--Utils.PlayAnim(0, 'random@domestic', 'pickup_low', 5.0, 1.5, 1000, 48, 0.0, 0, 0, 0)
+							return
+						end
+						client.openInventory('drop', point.dropId)
+					end,
+				},
+			}
+		})
 		point.entity = entity
 	end
 end
@@ -1017,23 +1035,25 @@ local function createDrop(dropId, data)
 	local point = lib.points.new({
 		coords = data.coords,
 		distance = 16,
-		invId = dropId,
+		dropId = dropId,
+		--invId = dropId,
 		instance = data.instance,
-		model = data.model
+		model = data.model,
+		actualCoords = data.coords,
+		dontGround = data.dontGround,
 	})
 
 	if point.model or client.dropprops then
 		point.distance = 30
 		point.onEnter = onEnterDrop
 		point.onExit = onExitDrop
-	else
-		point.nearby = nearbyDrop
 	end
 
 	client.drops[dropId] = point
 end
 
 RegisterNetEvent('ox_inventory:createDrop', function(dropId, data, owner, slot)
+
 	if client.drops then
 		createDrop(dropId, data)
 	end
@@ -1167,7 +1187,6 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 				buttons[i] = {label = v.buttons[i].label, group = v.buttons[i].group}
 			end
 		end
-
 		ItemData[v.name] = {
 			label = v.label,
 			stack = v.stack,
@@ -1176,7 +1195,8 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 			description = v.description,
 			buttons = buttons,
 			ammoName = v.ammoname,
-			image = v.client?.image
+			image = v.client?.image,
+			useText = v.useText,
 		}
 	end
 
@@ -1225,52 +1245,8 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 		createDrop(dropId, data)
 	end
 
-	local hasTextUi = false
-	local uiOptions = { icon = 'fa-id-card' }
-
-	---@param point CPoint
-	local function nearbyLicense(point)
-		---@diagnostic disable-next-line: param-type-mismatch
-		DrawMarker(2, point.coords.x, point.coords.y, point.coords.z, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.3, 0.2, 0.15, 30, 150, 30, 222, false, false, 0, true, false, false, false)
-
-		if point.isClosest and point.currentDistance < 1.2 then
-			if not hasTextUi then
-				hasTextUi = true
-				lib.showTextUI(point.message, uiOptions)
-			end
-
-			if IsControlJustReleased(0, 38) then
-				lib.callback('ox_inventory:buyLicense', 1000, function(success, message)
-					if success ~= nil then
-						lib.notify({
-							id = message,
-							type = success == false and 'error' or 'success',
-							description = locale(message, locale('license', point.type:gsub("^%l", string.upper)))
-						})
-					end
-				end, point.invId)
-			end
-		elseif hasTextUi then
-			hasTextUi = false
-			lib.hideTextUI()
-		end
-	end
-
-	for id, data in pairs(lib.load('data.licenses')) do
-		lib.points.new({
-			coords = data.coords,
-			distance = 16,
-			inv = 'license',
-			type = data.name,
-			price = data.price,
-			invId = id,
-			nearby = nearbyLicense,
-			message = ('**%s**  \n%s'):format(locale('purchase_license', data.name), locale('interact_prompt', GetControlInstructionalButton(0, 38, true):sub(3)))
-		})
-	end
-
 	while not client.uiLoaded do Wait(50) end
-
+	
 	SendNUIMessage({
 		action = 'init',
 		data = {
@@ -1354,7 +1330,7 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 				end
 
 				if weaponHash ~= currentWeapon.hash then
-					currentWeapon = Weapon.Disarm(currentWeapon, true)
+					Weapon.Disarm(currentWeapon, true)
 				end
 			end
 		elseif client.weaponmismatch and not client.ignoreweapons[weaponHash] then
@@ -1400,7 +1376,9 @@ RegisterNetEvent('ox_inventory:setPlayerInventory', function(currentDrops, inven
 			end
 
 			if usingItem or invBusy == true or IsPedCuffed(playerPed) then
-				DisablePlayerFiring(playerId, true)
+				if not exports['sn_arcade']:isPlaying() then
+					DisablePlayerFiring(playerId, true)
+				end
 			end
 
 			if not EnableWeaponWheel then
@@ -1624,71 +1602,228 @@ local function isGiveTargetValid(ped, coords)
 
     return entity == ped and IsEntityVisible(ped)
 end
+local function AddPropToPlayer(model)
+    local x, y, z = table.unpack(GetEntityCoords(cache.ped))
+    lib.requestModel(model or client.dropmodel)
+    holdingProp = CreateObject(model or client.dropmodel, x, y, z, true, true, true)
+    AttachEntityToEntity(holdingProp, cache.ped, GetPedBoneIndex(cache.ped, 28422), 0.069679043471183, 0.04805782064415, -0.030907978290745, -57.997442534015, 0.89426656250223, 0.5588148620418, true, true, false, true, 1, true)
+end
+
+local function getForwardVector(rotation)
+    local rot = (math.pi / 180.0) * rotation
+    return vector3(-math.sin(rot.z) * math.abs(math.cos(rot.x)), math.cos(rot.z) * math.abs(math.cos(rot.x)), math.sin(rot.x))
+end
+
+local RotationToDirection = function(rotation)
+    local adjustedRotation = {
+        x = (math.pi / 180) * rotation.x,
+        y = (math.pi / 180) * rotation.y,
+        z = (math.pi / 180) * rotation.z
+    }
+    local direction = {
+        x = -math.sin(adjustedRotation.z) * math.abs(math.cos(adjustedRotation.x)),
+        y = math.cos(adjustedRotation.z) * math.abs(math.cos(adjustedRotation.x)),
+        z = math.sin(adjustedRotation.x)
+    }
+    return direction
+end
+
+local RayCastGamePlayCamera = function(distance)
+    local currentRenderingCam = false
+    if not IsGameplayCamRendering() then
+        currentRenderingCam = GetRenderingCam()
+    end
+    local cameraRotation = not currentRenderingCam and GetGameplayCamRot() or GetCamRot(currentRenderingCam, 2)
+    local cameraCoord = not currentRenderingCam and GetGameplayCamCoord() or GetCamCoord(currentRenderingCam)
+    local direction = RotationToDirection(cameraRotation)
+    local destination = {
+        x = cameraCoord.x + direction.x * distance,
+        y = cameraCoord.y + direction.y * distance,
+        z = cameraCoord.z + direction.z * distance
+    }
+    local _, b, c, _, e = GetShapeTestResult(StartShapeTestRay(cameraCoord.x, cameraCoord.y, cameraCoord.z, destination.x, destination.y, destination.z, -1, PlayerPedId(), 0))
+    return b, c, e
+end
+
+local throwing = false
+local placeing = false
+local interactGiveOptions = {}
+
+local function closestGiveOption()
+	local pedCoords = GetEntityCoords(playerPed)
+	local closestOption, closestDist = nil, 999999.0
+	for i, option in pairs(interactGiveOptions) do
+		local distance = #(pedCoords - GetEntityCoords(option.ped))
+		if distance < closestDist or closestOption == nil then
+			closestOption = option
+			closestDist = distance
+		end
+	end
+	return closestOption, closestDist
+end
+
+local function setGiveOption(options)
+	interactGiveOptions = options or {}
+end
+exports('setGiveOption', setGiveOption)
 
 RegisterNUICallback('giveItem', function(data, cb)
 	cb(1)
-
-	if client.giveplayerlist then
-		local nearbyPlayers = lib.getNearbyPlayers(GetEntityCoords(playerPed), 3.0)
-        local nearbyCount = #nearbyPlayers
-
-		if nearbyCount == 0 then return end
-
-        if nearbyCount == 1 then
-			local option = nearbyPlayers[1]
-
-            if not isGiveTargetValid(option.ped, option.coords) then return end
-
-            return giveItemToTarget(GetPlayerServerId(option.id), data.slot, data.count)
-        end
-
-        local giveList, n = {}, 0
-
-		for i = 1, #nearbyPlayers do
-			local option = nearbyPlayers[i]
-
-            if isGiveTargetValid(option.ped, option.coords) then
-				local playerName = GetPlayerName(option.id)
-				option.id = GetPlayerServerId(option.id)
-                ---@diagnostic disable-next-line: inject-field
-				option.label = ('[%s] %s'):format(option.id, playerName)
-				n += 1
-				giveList[n] = option
+	client.closeInventory()
+	if givingItem or throwing then return end
+	givingItem = true
+	throwing = false
+	placeing = false
+	local itemData = exports.ox_inventory:GetPlayerItems()[data.slot]
+	local itemInvData = Items[itemData.name]
+	local heading = 0.0
+	if itemInvData.weapon then itemInvData.model = GetWeapontypeModel(itemInvData.name) end
+	if holdingProp then Utils.DeleteEntity(holdingProp) end
+	if not itemData then return end
+	local min, max = GetModelDimensions(itemInvData.model or client.dropmodel)
+	local size = (max - min)
+	lib.showTextUI('[E] - GiveItem | [R] - Place |  [Esc] - Cancel', {
+		position = "top-center",
+		style = {
+			borderRadius = 3,
+			backgroundColor = 'rgba(51, 10, 117, 0.8)',
+			color = 'white'
+		}
+	})
+	AddPropToPlayer(itemInvData.model)
+	exports.interact:AddInteraction({
+		coords = vec3(0.0, 0.0, 0.0),
+		distance = 10.0,
+		interactDst = 2.0,
+		id = 'ox_inv_giving',
+		options = {
+			{
+				action = function(entity, coords, args) end
+			},
+		}
+	})
+	while givingItem do
+		SetPauseMenuActive(false)
+		DisablePlayerFiring(cache.playerId, true)
+		DisableControlAction(0, 24, true)
+		DisableControlAction(0, 80, true)
+		DisableControlAction(0, 140, true)
+		if placeing then
+			local hit, coords, entity = RayCastGamePlayCamera(1000.0)
+			if #(coords - GetEntityCoords(cache.ped)) < 3.0 then
+				if IsControlPressed(2, 14) then
+					heading = heading - 3
+					if heading < 0 then heading = 360.0 end
+				elseif IsControlPressed(2, 15) then
+					heading = heading + 3
+					if heading > 360 then heading = 0.0 end
+				end
+				if IsDisabledControlJustReleased(0, 24) then
+					if data.count == 0 then data.count = 1 end
+					if data.count > itemData.count then data.count = itemData.count end
+					local success = lib.callback.await('ox_inventory:dropItem', false, {name = itemData.name, slot = data.slot, count = data.count, metadata = itemData.metadata, coords = vec4(coords.x,coords.y,coords.z, heading), model = itemInvData.model or client.dropmodel}, true)
+					givingItem = false
+				end
+				SetEntityCoords(holdingProp, coords.x, coords.y, coords.z + (size.z / 2))
+				SetEntityHeading(holdingProp, heading)
+				SetEntityAlpha(holdingProp, 200, false)
+			else
+				SetEntityAlpha(holdingProp, 0, false)
+			end
+		else
+			local closestPlayer, _, closestCoords = lib.getClosestPlayer(GetEntityCoords(cache.ped), 10.0, false)
+			local closestOption, closestDist = closestGiveOption()
+			if closestOption and closestPlayer and #(closestCoords - GetEntityCoords(cache.ped)) > closestDist then closestPlayer = nil end
+			if closestPlayer then
+				exports.interact:UpdateInteraction('ox_inv_giving', {
+					{
+						action = function(entity, coords, args)
+							giveItemToTarget(GetPlayerServerId(closestPlayer), data.slot, data.count)
+						end,
+				   }
+			   },vec3(closestCoords.x, closestCoords.y, closestCoords.z))
+				if IsControlJustReleased(0, 38) then
+					exports.interact:RemoveInteraction('ox_inv_giving')
+					Utils.DeleteEntity(holdingProp)
+					givingItem = false
+					lib.hideTextUI()
+					return
+				end
+			elseif closestOption then
+				exports.interact:UpdateInteraction('ox_inv_giving', {
+					{
+						action = function()
+							if data.count == 0 then data.count = 1 end
+							if data.count > itemData.count then data.count = itemData.count end
+								local args = {
+									option = closestOption,
+									item = itemData.name,
+									count = data.count,
+								}
+								if closestOption.event then
+									TriggerEvent(closestOption.event, args)
+								end
+						end,
+				   }
+			   }, GetEntityCoords(closestOption.ped))
+				if IsControlJustReleased(0, 38) then
+					exports.interact:RemoveInteraction('ox_inv_giving')
+					Utils.DeleteEntity(holdingProp)
+					givingItem = false
+					lib.hideTextUI()
+					return
+				end
+			end
+			if IsDisabledControlJustReleased(0, 24) then
+				if data.count == 0 then data.count = 1 end
+				if data.count > itemData.count then data.count = itemData.count end
+				givingItem = false
+				throwing = true
+				lib.hideTextUI()
+				lib.requestAnimDict('melee@unarmed@streamed_variations')
+				local forwardVector = getForwardVector(GetGameplayCamRot(2))
+				local force = 40.0
+				ClearPedTasks(cache.ped)
+				Utils.PlayAnim(0, 'melee@unarmed@streamed_variations', 'plyr_takedown_front_slap', 8.0, 1.0, -1, 0, 0, 0.0, false, false, true)
+				TriggerServerEvent('ox_inventory:removeItem', itemData.name, data.count, nil, data.slot)
+				Wait(500)
+				DetachEntity(holdingProp)
+				ApplyForceToEntity(holdingProp, 3, forwardVector.x*force, forwardVector.y*force + 5.0, forwardVector.z*30.0, 0, 0, 0, 0, false, true, true, false, true)
+				PropNetID = ObjToNet(holdingProp)
+				SetNetworkIdExistsOnAllMachines(PropNetID, true)
+				local time = GetGameTimer()
+				while (#GetEntityVelocity(holdingProp) < 0.00001) and ((GetGameTimer() - time) < 2000) do Wait(0) end
+				while (#GetEntityVelocity(holdingProp) > 0.2) and ((GetGameTimer() - time) < 7000) do Wait(0) end
+				if ((GetGameTimer() - time) > 7000) then PlaceObjectOnGroundProperly(holdingProp) end
+				local objCoords = GetEntityCoords(holdingProp)
+				local success = lib.callback.await('ox_inventory:dropItem', false, {name = itemData.name, slot = data.slot, count = data.count, metadata = itemData.metadata, coords = objCoords, model = itemInvData.model})
+				throwing = false
+			end
+			if IsDisabledControlJustReleased(0, 140) then
+				DetachEntity(holdingProp)
+				PlaceObjectOnGroundProperly(holdingProp)
+				FreezeEntityPosition(holdingProp, true)
+				SetEntityCollision(holdingProp, false, false)
+				heading = GetEntityHeading(cache.ped)
+				lib.showTextUI('[Scroll] - Rotate | [RMB] - Place |  [Esc] - Cancel', {
+					position = "top-center",
+					style = {
+						borderRadius = 3,
+						backgroundColor = 'rgba(51, 10, 117, 0.8)',
+						color = 'white'
+					}
+				})
+				placeing = true
 			end
 		end
-
-        if n == 0 then return end
-
-		lib.registerMenu({
-			id = 'ox_inventory:givePlayerList',
-			title = 'Give item',
-			options = giveList,
-		}, function(selected)
-            giveItemToTarget(giveList[selected].id, data.slot, data.count)
-        end)
-
-		return lib.showMenu('ox_inventory:givePlayerList')
+		if IsControlJustReleased(0, 202) then givingItem = false end
+		Wait(0)
 	end
-
-    if cache.vehicle then
-		local seats = GetVehicleMaxNumberOfPassengers(cache.vehicle) - 1
-
-		if seats >= 0 then
-			local passenger = GetPedInVehicleSeat(cache.vehicle, cache.seat - 2 * (cache.seat % 2) + 1)
-
-			if passenger ~= 0 and IsEntityVisible(passenger) then
-                return giveItemToTarget(GetPlayerServerId(NetworkGetPlayerIndexFromPed(passenger)), data.slot, data.count)
-			end
-		end
-
-        return
-	end
-
-    local entity = Utils.Raycast(1|2|4|8|16, GetOffsetFromEntityInWorldCoords(cache.ped, 0.0, 3.0, 0.5), 0.2)
-
-    if entity and IsPedAPlayer(entity) and IsEntityVisible(entity) and #(GetEntityCoords(playerPed, true) - GetEntityCoords(entity, true)) < 3.0 then
-        return giveItemToTarget(GetPlayerServerId(NetworkGetPlayerIndexFromPed(entity)), data.slot, data.count)
-    end
+	lib.hideTextUI()
+	exports.interact:RemoveInteraction('ox_inv_giving')
+	SetPauseMenuActive(true)
+	Utils.DeleteEntity(holdingProp)
+	return
 end)
 
 RegisterNUICallback('useButton', function(data, cb)

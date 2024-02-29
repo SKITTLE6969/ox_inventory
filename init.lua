@@ -37,6 +37,7 @@ end
 
 if IsDuplicityVersion() then
     server = {
+        droplast = {'days', 6},
         bulkstashsave = GetConvarInt('inventory:bulkstashsave', 1) == 1,
         loglevel = GetConvarInt('inventory:loglevel', 1),
         randomprices = GetConvarInt('inventory:randomprices', 0) == 1,

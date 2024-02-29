@@ -170,7 +170,8 @@ end
 ---@param gloveboxes InventorySaveData[]
 ---@param stashes (InventorySaveData | string | number)[]
 ---@param total number[]
-function db.saveInventories(players, trunks, gloveboxes, stashes, total)
+function db.saveInventories(players, trunks, gloveboxes, stashes, total, drops)
+    SaveResourceFile(GetCurrentResourceName(), './data/drops.json', json.encode(drops), -1)
     local promises = {}
     local start = os.nanotime()
 

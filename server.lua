@@ -55,7 +55,7 @@ function server.setPlayerInventory(player, data)
 	end
 
 	player.source = tonumber(player.source)
-	local inv = Inventory.Create(player.source, player.name, 'player', shared.playerslots, totalWeight, shared.playerweight, player.identifier, inventory)
+	local inv = Inventory.Create(player.source, ('%s %s'):format(player.charinfo.firstname, player.charinfo.lastname), 'player', shared.playerslots, totalWeight, shared.playerweight, player.identifier, inventory)
 
 	if inv then
 		inv.player = server.setPlayerData(player)
@@ -230,18 +230,6 @@ exports('forceOpenInventory', function(playerId, invType, data)
 		TriggerClientEvent('ox_inventory:forceOpenInventory', playerId, left, right)
 		return right.id
 	end
-end)
-
-local Licenses = lib.load('data.licenses')
-
-lib.callback.register('ox_inventory:buyLicense', function(source, id)
-	local license = Licenses[id]
-	if not license then return end
-
-	local inventory = Inventory(source)
-	if not inventory then return end
-
-	return server.buyLicense(inventory, license)
 end)
 
 lib.callback.register('ox_inventory:getItemCount', function(source, item, metadata, target)

@@ -7,14 +7,9 @@ end
 local ItemList = {}
 local isServer = IsDuplicityVersion()
 
-local function setImagePath(path)
-    if path then
-        return path:match('^[%w]+://') and path or ('%s/%s'):format(client.imagepath, path)
-    end
-end
-
 ---@param data OxItem
 local function newItem(data)
+	if ItemList[data.name] then print('DUPLICATE ITEMS', data.name) end
 	data.weight = data.weight or 0
 
 	if data.close == nil then
@@ -34,46 +29,34 @@ local function newItem(data)
 	end
 
 	if isServer then
-        ---@cast data OxServerItem
-        serverData = data.server
 		data.client = nil
+
+		if serverData?.export then
+			data.cb = useExport(string.strsplit('.', serverData.export))
+		end
 
 		if not data.durability then
 			if data.degrade or (data.consume and data.consume ~= 0 and data.consume < 1) then
 				data.durability = true
 			end
 		end
-
-        if not serverData then goto continue end
-
-        if serverData.export then
-            data.cb = useExport(string.strsplit('.', serverData.export))
-        end
 	else
-        ---@cast data OxClientItem
-        clientData = data.client
 		data.server = nil
 		data.count = 0
 
-        if not clientData then goto continue end
+		if clientData?.export then
+			data.export = useExport(string.strsplit('.', clientData.export))
+		end
 
-        if clientData.export then
-            data.export = useExport(string.strsplit('.', clientData.export))
-        end
-
-        clientData.image = setImagePath(clientData.image)
-
-        if clientData.propTwo then
-            clientData.prop = clientData.prop and { clientData.prop, clientData.propTwo } or clientData.propTwo
-            clientData.propTwo = nil
-        end
+		if clientData?.image then
+			clientData.image = clientData.image:match('^[%w]+://') and clientData.image or ('%s/%s'):format(client.imagepath, clientData.image)
+		end
 	end
 
-    ::continue::
 	ItemList[data.name] = data
 end
 
-for type, data in pairs(lib.load('data.weapons')) do
+for type, data in pairs(lib.load('data.items.weapons')) do
 	for k, v in pairs(data) do
 		v.name = k
 		v.close = type == 'Ammo' and true or false
@@ -98,7 +81,7 @@ for type, data in pairs(lib.load('data.weapons')) do
 			local clientData = v.client
 
 			if clientData?.image then
-                clientData.image = setImagePath(clientData.image)
+				clientData.image = clientData.image:match('^[%w]+://') and ('url(%s)'):format(clientData.image) or ('url(%s/%s)'):format(client.imagepath, clientData.image)
 			end
 		end
 
@@ -106,7 +89,41 @@ for type, data in pairs(lib.load('data.weapons')) do
 	end
 end
 
-for k, v in pairs(lib.load('data.items')) do
+for k, v in pairs(lib.load('data.items.foods')) do
+	v.name = k
+	v.useText = v.useText or 'Eat'
+	local success, response = pcall(newItem, v)
+    if not success then
+        warn(('An error occurred while creating item "%s" callback!\n^1SCRIPT ERROR: %s^0'):format(k, response))
+    end
+end
+
+for k, v in pairs(lib.load('data.items.drinks')) do
+	v.name = k
+	v.useText = v.useText or 'Drink'
+	local success, response = pcall(newItem, v)
+    if not success then
+        warn(('An error occurred while creating item "%s" callback!\n^1SCRIPT ERROR: %s^0'):format(k, response))
+    end
+end
+
+for k, v in pairs(lib.load('data.items.criminal')) do
+	v.name = k
+	local success, response = pcall(newItem, v)
+    if not success then
+        warn(('An error occurred while creating item "%s" callback!\n^1SCRIPT ERROR: %s^0'):format(k, response))
+    end
+end
+
+for k, v in pairs(lib.load('data.items.drugs')) do
+	v.name = k
+	local success, response = pcall(newItem, v)
+    if not success then
+        warn(('An error occurred while creating item "%s" callback!\n^1SCRIPT ERROR: %s^0'):format(k, response))
+    end
+end
+
+for k, v in pairs(lib.load('data.items.items')) do
 	v.name = k
 	local success, response = pcall(newItem, v)
 

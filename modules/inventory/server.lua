@@ -1,5 +1,12 @@
 if not lib then return end
 
+local secondsFormat = {
+    ['days'] = 86400,
+    ['hours'] = 3600,
+    ['minutes'] = 60,
+    ['seconds'] = 1,
+}
+
 local Inventory = {}
 
 ---@type table<any, OxInventory>
@@ -606,6 +613,7 @@ function Inventory.Remove(inv)
 		if inv.type == 'drop' then
 			TriggerClientEvent('ox_inventory:removeDrop', -1, inv.id)
 			Inventory.Drops[inv.id] = nil
+			Inventory.SaveDrops[inv.id] = nil
 		elseif inv.player then
 			activeIdentifiers[inv.owner] = nil
 		end
@@ -1223,10 +1231,8 @@ exports('Search', Inventory.Search)
 ---@param item table | string
 ---@param metadata? table
 function Inventory.GetItemSlots(inv, item, metadata)
-	if type(item) ~= 'table' then item = Items(item) end
-	if not item then return end
-
 	inv = Inventory(inv) --[[@as OxInventory]]
+
 	if not inv?.slots then return end
 
 	local totalCount, slots, emptySlots = 0, {}, inv.slots
@@ -1434,7 +1440,17 @@ RegisterServerEvent('ox_inventory:removeItem', function(name, count, metadata, s
 	Inventory.RemoveItem(source, name, count, metadata, slot)
 end)
 
+Inventory.SaveDrops = {}
 Inventory.Drops = {}
+
+
+local function formatTime(time)
+    local days = math.floor(time/86400)
+    local hours = math.floor(math.modf(time, 86400)/3600)
+    local minutes = math.floor(math.modf(time,3600)/60)
+    local seconds = math.floor(math.modf(time,60))
+    return {days = days,hours = hours,minutes = minutes,seconds = seconds}
+end
 
 ---@param prefix string?
 ---@return string
@@ -1448,22 +1464,22 @@ local function generateInvId(prefix)
 	end
 end
 
-local function CustomDrop(prefix, items, coords, slots, maxWeight, instance, model)
+local function CustomDrop(prefix, items, coords, slots, maxWeight, instance, model, dontGround, placed)
 	local dropId = generateInvId()
 	local inventory = Inventory.Create(dropId, ('%s %s'):format(prefix, dropId:gsub('%D', '')), 'drop', slots or shared.playerslots, 0, maxWeight or shared.playerweight, false, {})
-
 	if not inventory then return end
-
 	inventory.items, inventory.weight = generateItems(inventory, 'drop', items)
 	inventory.coords = coords
 	Inventory.Drops[dropId] = {
 		coords = inventory.coords,
 		instance = instance,
 		model = model,
+		dontGround = dontGround
 	}
-
+	Inventory.SaveDrops[dropId] = Inventory.Drops[dropId]
+	Inventory.SaveDrops[dropId].items = inventory.items
+	Inventory.SaveDrops[dropId].placed = placed or os.time()
 	TriggerClientEvent('ox_inventory:createDrop', -1, dropId, Inventory.Drops[dropId])
-
     return dropId
 end
 
@@ -1486,7 +1502,6 @@ exports('CreateDropFromPlayer', function(playerId)
 		coords = inventory.coords,
 		instance = Player(playerId).state.instance
 	}
-
 	Inventory.Clear(playerInventory)
 	TriggerClientEvent('ox_inventory:createDrop', -1, dropId, Inventory.Drops[dropId])
 
@@ -1510,7 +1525,6 @@ local TriggerEventHooks = require 'modules.hooks.server'
 ---@param data SwapSlotData
 local function dropItem(source, playerInventory, fromData, data)
     if not fromData then return end
-
 	local toData = table.clone(fromData)
 	toData.slot = data.toSlot
 	toData.count = data.count
@@ -1574,6 +1588,23 @@ local function dropItem(source, playerInventory, fromData, data)
 		}
 	}
 end
+
+lib.callback.register('ox_inventory:dropItem', function(source, data, dontGround)
+	if dontGround then Inventory.RemoveItem(source, data.name, data.count, nil, data.slot) end
+	exports.ox_inventory:CustomDrop('drop', {
+		{data.name, data.count, data.metadata}
+	}, data.coords, 1,nil,nil, data.model, dontGround)
+	return
+end)
+
+lib.callback.register('ox_inventory:canPickUpDrop', function(source, dropId)
+	local playerItems = exports.ox_inventory:GetInventoryItems(dropId)
+	if #playerItems == 1 then
+		local item = playerItems[1]
+		return exports.ox_inventory:AddItem(source, item.name, item.count, item.metadata), Inventory.Remove(dropId)
+	end
+	return false
+end)
 
 local activeSlots = {}
 
@@ -2295,7 +2326,7 @@ local function saveInventories(clearInventories)
 	end
 
     if total[5] > 0 then
-	    db.saveInventories(parameters[1], parameters[2], parameters[3], parameters[4], total)
+	    db.saveInventories(parameters[1], parameters[2], parameters[3], parameters[4], total, Inventory.SaveDrops)
     end
 
 	isSaving = false
@@ -2310,13 +2341,22 @@ local function saveInventories(clearInventories)
                     Inventory.Remove(inv)
                 end
             elseif time - inv.time >= inventoryClearTime then
-                Inventory.Remove(inv)
+				if not Inventory.SaveDrops[inv.id] then
+					Inventory.Remove(inv)
+				end
             end
         end
     end
 end
 
 lib.cron.new('*/5 * * * *', function()
+	for dropID, drop in pairs(Inventory.SaveDrops) do
+		local timePassed = formatTime(os.difftime(os.time(), drop.placed))
+		if timePassed[server.droplast[1]] > server.droplast[2] then
+			Inventory.Remove(dropID)
+			Inventory.SaveDrops[dropID] = nil
+		end
+	end
     saveInventories(true)
 end)
 
@@ -2678,5 +2718,17 @@ function Inventory.InspectInventory(playerId, invId)
 end
 
 exports('InspectInventory', Inventory.InspectInventory)
+
+for dropID, drop in pairs(json.decode(LoadResourceFile(GetCurrentResourceName(), './data/drops.json'))) do
+	local timePassed = formatTime(os.difftime(os.time(), drop.placed))
+	if timePassed[server.droplast[1]] < server.droplast[2] then
+		local itemTable = {}
+		for i, item in pairs(drop.items) do
+			itemTable[#itemTable+1] = {item.name, item.count, item.metadata}
+		end
+		CustomDrop('drop', itemTable, drop.coords, drop.slots, drop.maxWeight, drop.instance, drop.model, drop.dontGround, drop.placed)
+	end
+	Inventory.SaveDrops[dropID] = nil
+end
 
 return Inventory
